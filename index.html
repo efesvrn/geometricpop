@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Geometric Core - Evolution</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Fredoka:wght@400;600&display=swap');
+
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #121212; /* Daha koyu arka plan */
+            font-family: 'Fredoka', sans-serif;
+            touch-action: none; /* Mobil tarayıcı kaydırmayı engelle */
+        }
+
+        #gameCanvas {
+            display: block;
+            width: 100%;
+            height: 100vh;
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            z-index: 5;
+        }
+
+        .hud {
+            padding: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            color: #ecf0f1;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.5);
+        }
+
+        .score-box { font-size: 20px; }
+        .score-val { font-size: 32px; font-weight: 600; color: #f1c40f; }
+        .next-label { font-size: 12px; opacity: 0.7; margin-bottom: 5px; }
+        #next-canvas { width: 50px; height: 50px; }
+
+        #game-over-screen {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(18, 18, 18, 0.95);
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            opacity: 0; transition: opacity 0.5s; pointer-events: none; z-index: 10;
+        }
+        #game-over-screen.active { opacity: 1; pointer-events: auto; }
+        h1 { color: #ecf0f1; font-size: 48px; margin-bottom: 10px; }
+        p { color: #95a5a6; font-size: 20px; margin-bottom: 40px; }
+        button {
+            background: #f1c40f; border: none; padding: 15px 40px;
+            font-size: 24px; font-family: 'Fredoka', sans-serif; font-weight: 600;
+            color: #2c3e50; border-radius: 50px; cursor: pointer;
+            box-shadow: 0 10px 20px rgba(241, 196, 15, 0.3);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        button:active { transform: scale(0.95); box-shadow: 0 5px 10px rgba(241, 196, 15, 0.2); }
+        .tutorial {
+            position: absolute; bottom: 120px; width: 100%; text-align: center;
+            color: rgba(255,255,255,0.4); font-size: 14px; pointer-events: none;
+            animation: fadeOut 4s forwards 3s;
+        }
+        @keyframes fadeOut { to { opacity: 0; } }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div class="hud">
+            <div class="score-box">SKOR<br><span class="score-val" id="score">0</span></div>
+            <div class="next-shape-container" style="text-align: right;">
+                <div class="next-label">SIRADAKİ</div>
+                <canvas id="next-canvas" width="50" height="50"></canvas>
+            </div>
+        </div>
+        <div class="tutorial">Nişan almak için sürükle, atmak için bırak</div>
+    </div>
+
+    <div id="game-over-screen">
+        <h1>Oyun Bitti!</h1>
+        <p>Son Skor: <span id="final-score">0</span></p>
+        <button onclick="resetGame()">Tekrar Dene</button>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+<script>
+/**
+ * GEOMETRIC CORE - Evolution & Physics Based
+ */
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const nextCanvas = document.getElementById('next-canvas');
+const nextCtx = nextCanvas.getContext('2d');
+const scoreEl = document.getElementById('score');
+const finalScoreEl = document.getElementById('final-score');
+const gameOverScreen = document.getElementById('game-over-screen');
+
+// --- Yapılandırma ---
+const CONFIG = {
+    // Şekil hiyerarşisi ve renkleri
+    shapes: [
+        { type: 'triangle', color: '#58D68D', mergeScore: 10, radius: 20 },
+        { type: 'square', color: '#E74C3C', mergeScore: 20, radius: 25 },
+        { type: 'pentagon', color: '#F1C40F', mergeScore: 30, radius: 30 },
+        { type: 'circle', color: '#5DADE2', mergeScore: 50, radius: 35 } // En üst seviye
+    ],
+    bg: '#121212',
+    bulletSpeed: 20, // Atış hızı
+    initialShapes: 15, // Başlangıçtaki rastgele şekil sayısı
+    spawnRate: 150, // Yeni şekillerin ortaya çıkma sıklığı (her X frame'de)
+    pushForce: 5, // Birleşme sonrası itme gücü
+    maxShapes: 100, // Ekrandaki maksimum şekil sayısı
+    coreRadius: 60, // Merkez çekirdeğin yarıçapı
+    gameOverMargin: 20, // Çekirdeğin ne kadar dışına taşınca oyun biter
+};
+
+// --- Değişkenler ---
+let width, height;
+let shapesOnScreen = []; // Artık "grid" yok, serbest şekiller var
+let particles = [];
+let shooter = { x: 0, y: 0, currentShape: null, nextShape: null, angle: -Math.PI / 2 };
+let animationId;
+let score = 0;
+let isGameOver = false;
+let frameCount = 0;
+
+// Ses Context
+const AudioContext = window.AudioContext || window.webkitAudioContext;
+let audioCtx = new AudioContext();
+
+// --- Başlatma ---
+function init() {
+    resize();
+    window.addEventListener('resize', resize);
+    
+    canvas.addEventListener('mousedown', onPointerDown);
+    canvas.addEventListener('mousemove', onPointerMove);
+    window.addEventListener('mouseup', onPointerUp);
+    canvas.addEventListener('touchstart', (e) => onPointerDown(e.touches[0]));
+    canvas.addEventListener('touchmove', (e) => { e.preventDefault(); onPointerMove(e.touches[0]); });
+    canvas.addEventListener('touchend', onPointerUp);
+
+    resetGame();
+    loop();
+}
+
+function resize() {
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = width;
+    canvas.height = height;
+
+    // Fırlatıcı her zaman ekranın ortasında, alt kısımda
+    shooter.x = width / 2;
+    shooter.y = height - 80;
+}
+
+function resetGame() {
+    shapesOnScreen = [];
+    particles = [];
+    score = 0;
+    isGameOver = false;
+    shooter.currentShape = getRandomShapeType();
+    shooter.nextShape = getRandomShapeType();
+    shooter.angle = -Math.PI / 2;
+    scoreEl.innerText = '0';
+    gameOverScreen.classList.remove('active');
+    frameCount = 0;
+
+    // Başlangıç şekillerini ekle
+    for (let i = 0; i < CONFIG.initialShapes; i++) {
+        spawnRandomShape();
+    }
+    drawNextShape();
+}
+
+// Rastgele bir şekil tipi döndürür (en üst seviye hariç)
+function getRandomShapeType() {
+    const randomIndex = Math.floor(Math.random() * (CONFIG.shapes.length - 1)); // Son şekil hariç
+    return CONFIG.shapes[randomIndex];
+}
+
+// --- Oyun Döngüsü ---
+function loop() {
+    update();
+    draw();
+    if (!isGameOver) {
+        animationId = requestAnimationFrame(loop);
+    }
+}
+
+function update() {
+    frameCount++;
+
+    // Yeni şekil ortaya çıkarma (belirli aralıklarla)
+    if (frameCount % CONFIG.spawnRate === 0 && shapesOnScreen.length < CONFIG.maxShapes) {
+        spawnRandomShape();
+    }
+
+    // Şekillerin hareketi ve etkileşimi
+    for (let i = 0; i < shapesOnScreen.length; i++) {
+        let s1 = shapesOnScreen[i];
+
+        // Yerçekimi / Merkeze çekim kuvveti (Hafifçe merkeze doğru kayma)
+        let dxToCenter = width / 2 - s1.x;
+        let dyToCenter = height / 2 - s1.y;
+        let distToCenter = Math.sqrt(dxToCenter * dxToCenter + dyToCenter * dyToCenter);
+        if (distToCenter > s1.radius) { // Çekirdeğin dışındaysa
+             s1.vx += (dxToCenter / distToCenter) * 0.02;
+             s1.vy += (dyToCenter / distToCenter) * 0.02;
+        }
+
+
+        s1.x += s1.vx;
+        s1.y += s1.vy;
+
+        // Sürtünme
+        s1.vx *= 0.98;
+        s1.vy *= 0.98;
+
+        // Ekran sınırlarında sektirme
+        if (s1.x - s1.radius < 0 || s1.x + s1.radius > width) s1.vx *= -1;
+        if (s1.y - s1.radius < 0 || s1.y + s1.radius > height) s1.vy *= -1;
+
+        // Diğer şekillerle çarpışma kontrolü
+        for (let j = i + 1; j < shapesOnScreen.length; j++) {
+            let s2 = shapesOnScreen[j];
+            let dx = s2.x - s1.x;
+            let dy = s2.y - s1.y;
+            let dist = Math.sqrt(dx * dx + dy * dy);
+            let minDist = s1.radius + s2.radius;
+
+            if (dist < minDist) {
+                // Şekiller üst üste binerse ayrıştırma
+                let angle = Math.atan2(dy, dx);
+                let overlap = minDist - dist;
+                s1.x -= Math.cos(angle) * overlap * 0.5;
+                s1.y -= Math.sin(angle) * overlap * 0.5;
+                s2.x += Math.cos(angle) * overlap * 0.5;
+                s2.y += Math.sin(angle) * overlap * 0.5;
+
+                // Elastik çarpışma (basit)
+                let tempVx = s1.vx;
+                let tempVy = s1.vy;
+                s1.vx = s2.vx;
+                s1.vy = s2.vy;
+                s2.vx = tempVx;
+                s2.vy = tempVy;
+
+                // YENİ: Birleşme kontrolü
+                if (s1.type.type === s2.type.type && s1.canMerge && s2.canMerge) {
+                    mergeShapes(s1, s2);
+                    // Birleşen şekiller güncellendiği için döngüden çıkıp yeniden başlatma (güvenli)
+                    return; 
+                }
+            }
+        }
+    }
+
+    // Partiküller
+    for (let i = particles.length - 1; i >= 0; i--) {
+        let p = particles[i];
+        p.x += p.vx; p.y += p.vy; p.life -= 0.05; p.size *= 0.95;
+        if (p.life <= 0) particles.splice(i, 1);
+    }
+
+    checkGameOver();
+}
+
+function spawnRandomShape() {
+    const type = getRandomShapeType();
+    const radius = type.radius;
+    let spawnX, spawnY;
+
+    // Ekran kenarlarından ortaya doğru spawn et
+    let edge = Math.floor(Math.random() * 4); // 0:üst, 1:sağ, 2:alt, 3:sol
+    if (edge === 0) { spawnX = Math.random() * width; spawnY = -radius; }
+    else if (edge === 1) { spawnX = width + radius; spawnY = Math.random() * height; }
+    else if (edge === 2) { spawnX = Math.random() * width; spawnY = height + radius; }
+    else { spawnX = -radius; spawnY = Math.random() * height; }
+
+    shapesOnScreen.push({
+        type: type,
+        x: spawnX,
+        y: spawnY,
+        radius: radius,
+        vx: (width / 2 - spawnX) / 100, // Merkeze doğru başlangıç hızı
+        vy: (height / 2 - spawnY) / 100,
+        scale: 1,
+        canMerge: true // Birleşme animasyonu sırasında false olabilir
+    });
+}
+
+function mergeShapes(s1, s2) {
+    // Aynı türden en üst seviye şekilse patlat
+    if (s1.type.type === 'circle') {
+        createExplosion(s1.x, s1.y, s1.type);
+        removeShape(s1);
+        removeShape(s2);
+        score += s1.type.mergeScore;
+        scoreEl.innerText = score;
+        playSound('burst', 800);
+        // İtme efekti: çevredeki şekilleri dışarı it
+        applyRadialForce(s1.x, s1.y, CONFIG.pushForce * 2, s1.radius * 3);
+        return;
+    }
+
+    // İki şekli sil ve yeni, daha yüksek seviyeli şekli ekle
+    const newShapeIndex = CONFIG.shapes.indexOf(s1.type) + 1;
+    const newShapeType = CONFIG.shapes[newShapeIndex];
+
+    const newX = (s1.x + s2.x) / 2;
+    const newY = (s1.y + s2.y) / 2;
+
+    createExplosion(newX, newY, newShapeType); // Birleşme animasyonu
+    playSound('merge', 300 + newShapeIndex * 100);
+
+    removeShape(s1);
+    removeShape(s2);
+
+    shapesOnScreen.push({
+        type: newShapeType,
+        x: newX,
+        y: newY,
+        radius: newShapeType.radius,
+        vx: 0, vy: 0,
+        scale: 1.5, // Birleşince büyüsün
+        canMerge: false // Hemen tekrar birleşmesin
+    });
+
+    score += newShapeType.mergeScore;
+    scoreEl.innerText = score;
+
+    // Birleşme sonrası itme efekti
+    applyRadialForce(newX, newY, CONFIG.pushForce, newShapeType.radius * 2);
+
+    // Yeni şeklin canMerge özelliğini bir süre sonra tekrar aç
+    const newlyMergedShape = shapesOnScreen[shapesOnScreen.length - 1];
+    setTimeout(() => {
+        if (newlyMergedShape) newlyMergedShape.canMerge = true;
+    }, 500);
+}
+
+function removeShape(shapeToRemove) {
+    const index = shapesOnScreen.indexOf(shapeToRemove);
+    if (index > -1) {
+        shapesOnScreen.splice(index, 1);
+    }
+}
+
+function applyRadialForce(centerX, centerY, force, effectRadius) {
+    shapesOnScreen.forEach(s => {
+        if (s.x === centerX && s.y === centerY) return; // Kendisine kuvvet uygulamasın
+
+        let dx = s.x - centerX;
+        let dy = s.y - centerY;
+        let dist = Math.sqrt(dx * dx + dy * dy);
+
+        if (dist < effectRadius && dist > 0) {
+            let strength = force * (1 - dist / effectRadius); // Merkeze yakınsa daha güçlü
+            s.vx += (dx / dist) * strength;
+            s.vy += (dy / dist) * strength;
+        }
+    });
+}
+
+
+function checkGameOver() {
+    // Merkezdeki çekirdekten (görsel olarak çizdiğimiz yer) çok uzakta bir şekil varsa oyun biter
+    const coreX = width / 2;
+    const coreY = height / 2;
+
+    for (let i = 0; i < shapesOnScreen.length; i++) {
+        let s = shapesOnScreen[i];
+        let dx = s.x - coreX;
+        let dy = s.y - coreY;
+        let distFromCore = Math.sqrt(dx * dx + dy * dy);
+
+        // Eğer bir şekil çekirdek alanının dışına çok fazla taşarsa oyun biter
+        if (distFromCore > CONFIG.coreRadius + CONFIG.gameOverMargin) {
+            isGameOver = true;
+            finalScoreEl.innerText = score;
+            gameOverScreen.classList.add('active');
+            playSound('gameover', 100);
+            return;
+        }
+    }
+}
+
+// --- Grafik Çizimi ---
+function draw() {
+    ctx.fillStyle = CONFIG.bg;
+    ctx.fillRect(0, 0, width, height);
+
+    // Merkez Çekirdeği Çiz
+    ctx.beginPath();
+    ctx.arc(width / 2, height / 2, CONFIG.coreRadius, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    // Oyun Bitti marjını çiz (oyuncuya rehberlik etmesi için)
+    ctx.beginPath();
+    ctx.arc(width / 2, height / 2, CONFIG.coreRadius + CONFIG.gameOverMargin, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,0,0,0.2)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([5, 5]);
+    ctx.stroke();
+    ctx.setLineDash([]); // Çizgi stilini sıfırla
+
+    // Şekilleri Çiz
+    shapesOnScreen.forEach(s => {
+        drawShape(ctx, s.x, s.y, s.type.type, s.type.color, s.radius * s.scale);
+    });
+
+    // Mermi Çizimi (yani fırlattığımız şekil)
+    if (shooter.bullet) {
+        drawShape(ctx, shooter.bullet.x, shooter.bullet.y, shooter.bullet.type.type, shooter.bullet.type.color, shooter.bullet.type.radius * shooter.bullet.scale);
+    }
+
+    // Fırlatıcı Çizimi ve Nişan Hattı
+    ctx.save();
+    ctx.translate(shooter.x, shooter.y);
+    if (!shooter.bullet) {
+        // Nişan hattı
+        ctx.beginPath();
+        ctx.setLineDash([5, 10]);
+        ctx.moveTo(0, 0);
+        ctx.lineTo(Math.cos(shooter.angle) * 150, Math.sin(shooter.angle) * 150);
+        ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Sıradaki atılacak şekil
+        drawShape(ctx, 0, 0, shooter.currentShape.type, shooter.currentShape.color, shooter.currentShape.radius);
+    }
+    ctx.restore();
+
+    // Partiküller
+    particles.forEach(p => {
+        ctx.fillStyle = p.color;
+        ctx.globalAlpha = p.life;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+    });
+}
+
+// Şekil çizim fonksiyonu (boyut, tip ve renk parametreleriyle)
+function drawShape(context, x, y, type, color, size) {
+    if (!size || size <= 0) size = 5; // Güvenlik değeri
+    context.fillStyle = color;
+    context.beginPath();
+
+    if (type === 'circle') {
+        context.arc(x, y, size, 0, Math.PI * 2);
+    } else if (type === 'square') {
+        context.rect(x - size, y - size, size * 2, size * 2);
+    } else if (type === 'triangle') {
+        context.moveTo(x, y - size);
+        context.lineTo(x + size, y + size);
+        context.lineTo(x - size, y + size);
+        context.closePath();
+    } else if (type === 'pentagon') {
+        for (let i = 0; i < 5; i++) {
+            let angle = (i * 2 * Math.PI / 5) - Math.PI / 2;
+            let px = x + size * Math.cos(angle);
+            let py = y + size * Math.sin(angle);
+            if (i === 0) context.moveTo(px, py);
+            else context.lineTo(px, py);
+        }
+        context.closePath();
+    }
+    
+    context.shadowColor = 'rgba(0,0,0,0.4)'; // Daha belirgin gölge
+    context.shadowBlur = 8;
+    context.shadowOffsetY = 4;
+    context.fill();
+    context.shadowOffsetY = 0;
+    context.shadowBlur = 0;
+}
+
+function drawNextShape() {
+    nextCtx.clearRect(0,0,50,50);
+    if(shooter.nextShape) {
+        drawShape(nextCtx, 25, 25, shooter.nextShape.type, shooter.nextShape.color, 15);
+    }
+}
+
+// --- Efektler & Ses ---
+function createExplosion(x, y, type) {
+    const color = type.color;
+    for(let i=0; i<15; i++) { // Daha fazla partikül
+        particles.push({
+            x: x, y: y,
+            vx: (Math.random()-0.5)*15, vy: (Math.random()-0.5)*15,
+            size: Math.random()*6+3, color: color, life: 1.0
+        });
+    }
+}
+
+function playSound(type, freqStart) {
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const osc = audioCtx.createOscillator(); const gainNode = audioCtx.createGain();
+    osc.connect(gainNode); gainNode.connect(audioCtx.destination);
+    if (type === 'pop') { osc.type = 'sine'; osc.frequency.setValueAtTime(freqStart || 400, audioCtx.currentTime); osc.frequency.exponentialRampToValueAtTime(100, audioCtx.currentTime + 0.1); gainNode.gain.setValueAtTime(0.5, audioCtx.currentTime); gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1); osc.start(); osc.stop(audioCtx.currentTime + 0.1); }
+    else if (type === 'shoot') { osc.type = 'triangle'; osc.frequency.setValueAtTime(200, audioCtx.currentTime); osc.frequency.linearRampToValueAtTime(600, audioCtx.currentTime + 0.15); gainNode.gain.setValueAtTime(0.2, audioCtx.currentTime); gainNode.gain.linearRampToValueAtTime(0.01, audioCtx.currentTime + 0.15); osc.start(); osc.stop(audioCtx.currentTime + 0.15); }
+    else if (type === 'merge') { osc.type = 'square'; osc.frequency.setValueAtTime(freqStart, audioCtx.currentTime); osc.frequency.exponentialRampToValueAtTime(freqStart * 1.5, audioCtx.currentTime + 0.1); gainNode.gain.setValueAtTime(0.4, audioCtx.currentTime); gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.2); osc.start(); osc.stop(audioCtx.currentTime + 0.2); }
+    else if (type === 'burst') { osc.type = 'sawtooth'; osc.frequency.setValueAtTime(freqStart, audioCtx.currentTime); osc.frequency.exponentialRampToValueAtTime(freqStart / 2, audioCtx.currentTime + 0.3); gainNode.gain.setValueAtTime(0.6, audioCtx.currentTime); gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.4); osc.start(); osc.stop(audioCtx.currentTime + 0.4); }
+    else if (type === 'gameover') { osc.type = 'sawtooth'; osc.frequency.setValueAtTime(300, audioCtx.currentTime); osc.frequency.linearRampToValueAtTime(50, audioCtx.currentTime + 0.8); gainNode.gain.setValueAtTime(0.5, audioCtx.currentTime); gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.8); osc.start(); osc.stop(audioCtx.currentTime + 0.8); }
+}
+
+// --- Girdi ---
+let isDragging = false;
+function onPointerDown(e) {
+    if (isGameOver) return;
+    isDragging = true;
+    updateAim(e);
+}
+function onPointerMove(e) {
+    if (isDragging) updateAim(e);
+}
+function onPointerUp(e) {
+    if (isDragging && !shooter.bullet && !isGameOver) fire();
+    isDragging = false;
+}
+
+function updateAim(e) {
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX || e.x) - rect.left;
+    const y = (e.clientY || e.y) - rect.top;
+    
+    const dx = x - shooter.x;
+    const dy = y - shooter.y;
+    
+    let angle = Math.atan2(dy, dx);
+    if (angle > -0.2) angle = -0.2; // Belirli bir açıyla sınırlama
+    if (angle < -Math.PI + 0.2) angle = -Math.PI + 0.2;
+    shooter.angle = angle;
+}
+
+function fire() {
+    shooter.bullet = {
+        type: shooter.currentShape,
+        x: shooter.x,
+        y: shooter.y,
+        radius: shooter.currentShape.radius,
+        vx: Math.cos(shooter.angle) * CONFIG.bulletSpeed,
+        vy: Math.sin(shooter.angle) * CONFIG.bulletSpeed,
+        scale: 1,
+        canMerge: true // Fırlatılan şekiller birleşebilir
+    };
+    shapesOnScreen.push(shooter.bullet); // Fırlatılanı da genel şekiller listesine ekle
+    shooter.bullet = null; // Mermi artık genel listede, fırlatıcı boş
+    playSound('shoot');
+
+    // Sıradaki şekilleri güncelle
+    shooter.currentShape = shooter.nextShape;
+    shooter.nextShape = getRandomShapeType();
+    drawNextShape();
+}
+
+init();
+
+</script>
+</body>
+</html>
